@@ -1,0 +1,6 @@
+{
+  "name": "Алиппе Жолу",
+  "description": "Интерактивные 15-минутные занятия по кыргызскому языку («Алиппе») и счету от 1 до 100 для первоклассников с озвучкой, звездами, кабинетом родителя и панелью учителя.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
