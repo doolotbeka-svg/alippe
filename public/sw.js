@@ -1,6 +1,6 @@
 // Простой service worker: сеть с откатом на кэш (network-first),
 // чтобы приложение открывалось без интернета после первого визита.
-const CACHE = 'alippe-v2';
+const CACHE = 'alippe-v3';
 const PRECACHE = ['/', '/index.html', '/manifest.json', '/icon.svg'];
 
 self.addEventListener('install', (event) => {

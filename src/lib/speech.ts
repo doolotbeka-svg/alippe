@@ -28,6 +28,7 @@ export function normalizeKey(text: string): string {
 /** Загружает список аудиофайлов. Вызывается при старте, чтобы speak() работал синхронно. */
 export function preloadSpeech(): Promise<void> {
   if (!manifestRequest) {
+    initVoices();
     manifestRequest = fetch(`${AUDIO_BASE}index.json`)
       .then((r) => (r.ok ? r.json() : {}))
       .then((data: unknown) => {
@@ -74,9 +75,21 @@ function stopAll(): void {
 const LANG_PREFERENCE = ['ky', 'kk', 'tr', 'ru'];
 const NATURAL_HINTS = /natural|neural|online|google|premium|enhanced/i;
 
+let cachedVoices: SpeechSynthesisVoice[] = [];
+
+/** Chrome отдаёт список голосов асинхронно — подписываемся заранее. */
+function initVoices(): void {
+  if (!isSpeechSupported()) return;
+  const load = () => {
+    cachedVoices = speechSynthesis.getVoices();
+  };
+  load();
+  speechSynthesis.addEventListener?.('voiceschanged', load);
+}
+
 function pickVoice(): SpeechSynthesisVoice | null {
   if (!isSpeechSupported()) return null;
-  const voices = speechSynthesis.getVoices();
+  const voices = cachedVoices.length ? cachedVoices : speechSynthesis.getVoices();
   for (const lang of LANG_PREFERENCE) {
     const matches = voices.filter((v) => v.lang.toLowerCase().startsWith(lang));
     if (matches.length) return matches.find((v) => NATURAL_HINTS.test(v.name)) ?? matches[0];
@@ -97,7 +110,9 @@ function speakSynth(text: string, rate: number): void {
       u.voice = voice;
       u.lang = voice.lang;
     } else {
-      u.lang = 'ky-KG';
+      // Подходящих голосов нет в списке — просим хотя бы русский,
+      // иначе браузер может взять английский голос, который не читает кириллицу.
+      u.lang = 'ru-RU';
     }
     u.rate = Math.min(1.5, Math.max(0.5, rate));
     u.pitch = 1.05;

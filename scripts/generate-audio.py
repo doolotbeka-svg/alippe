@@ -35,6 +35,29 @@ def file_name(key: str) -> str:
     return hashlib.sha1(key.encode("utf-8")).hexdigest()[:12] + ".mp3"
 
 
+SEEDS = 8
+GOOD_ENOUGH = 0.6
+MIN_VOICED = 0.3
+
+
+def voiced_ratio(wave: np.ndarray, rate: int) -> float:
+    """Доля громких кадров с выраженным тоном 80–400 Гц (голос, а не шум/шипение)."""
+    frame, hop = int(0.04 * rate), int(0.01 * rate)
+    lo, hi = rate // 400, rate // 80
+    peak = float(np.max(np.abs(wave))) or 1.0
+    voiced = total = 0
+    for start in range(0, len(wave) - frame, hop):
+        f = wave[start: start + frame]
+        if np.sqrt(np.mean(f ** 2)) < 0.02 * peak:
+            continue
+        f = f - f.mean()
+        ac = np.correlate(f, f, "full")[frame - 1:]
+        ac /= ac[0] + 1e-9
+        total += 1
+        voiced += ac[lo:hi].max() > 0.5
+    return voiced / max(total, 1)
+
+
 def to_mp3(wave: np.ndarray, rate: int) -> bytes:
     # Срезаем тишину по краям и слегка нормализуем громкость.
     idx = np.where(np.abs(wave) > 0.02)[0]
@@ -61,33 +84,52 @@ def main() -> None:
     tokenizer = AutoTokenizer.from_pretrained(MODEL)
     model = VitsModel.from_pretrained(MODEL)
     model.eval()
-    # Чуть медленнее и стабильнее, чем по умолчанию — для детей.
-    model.config.speaking_rate = 0.85
+    # Чуть медленнее, чем по умолчанию — для детей.
     model.speaking_rate = 0.85
-    model.noise_scale = 0.5
+    sr = model.config.sampling_rate
 
     index: dict[str, str] = {}
+    rejected: list[str] = []
     for i, phrase in enumerate(phrases, 1):
         key = normalize(phrase)
         name = file_name(key)
-        index[key] = name
         target = out_dir / name
         if target.exists():
+            # Уже есть (в т.ч. запись живого диктора) — не трогаем.
+            index[key] = name
             continue
         inputs = tokenizer(key, return_tensors="pt")
         if inputs["input_ids"].shape[-1] == 0:
             print(f"skip (no tokens): {phrase}")
             continue
-        torch.manual_seed(1)
-        with torch.no_grad():
-            wave = model(**inputs).waveform[0].numpy()
-        target.write_bytes(to_mp3(wave, model.config.sampling_rate))
-        print(f"[{i}/{len(phrases)}] {key} -> {name}")
+
+        # Модель недетерминирована: пробуем несколько раз и берём самый «голосовой» вариант.
+        best_wave, best_score = None, -1.0
+        for seed in range(SEEDS):
+            torch.manual_seed(seed)
+            with torch.no_grad():
+                wave = model(**inputs).waveform[0].numpy()
+            score = voiced_ratio(wave, sr)
+            if score > best_score:
+                best_wave, best_score = wave, score
+            if score >= GOOD_ENOUGH:
+                break
+
+        if best_score < MIN_VOICED:
+            # Короткие слоги и отдельные буквы MMS не умеет: получается шипение.
+            # Такие фразы приложение озвучит голосом браузера.
+            rejected.append(key)
+            print(f"[{i}/{len(phrases)}] REJECT {key} (voiced={best_score:.2f})")
+            continue
+
+        target.write_bytes(to_mp3(best_wave, sr))
+        index[key] = name
+        print(f"[{i}/{len(phrases)}] {key} -> {name} (voiced={best_score:.2f})")
 
     (out_dir / "index.json").write_text(
         json.dumps(index, ensure_ascii=False, indent=0), encoding="utf-8"
     )
-    print(f"done: {len(index)} phrases")
+    print(f"done: {len(index)} clips, rejected {len(rejected)}: {', '.join(rejected)}")
 
 
 if __name__ == "__main__":
