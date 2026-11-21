@@ -204,6 +204,23 @@ export const MATH_RANGES: MathRange[] = [
   { id: '1-100', label: 'Числа 1–100', min: 1, max: 100, step: 1 },
 ];
 
+/** Как буква называется вслух в кыргызском алфавите. */
+const LETTER_NAMES: Record<string, string> = {
+  А: 'а', О: 'о', Ө: 'ө', Ү: 'ү', Э: 'э',
+  Б: 'бэ', М: 'мэ', К: 'ка', Т: 'тэ', Ж: 'жэ', С: 'эс', Ч: 'чэ',
+};
+
+export function letterSpeechText(id: string): string {
+  return LETTER_NAMES[id] ?? id.toLowerCase();
+}
+
+/** Короткие кыргызские фразы-отклики для ребёнка. */
+export const PRAISE = {
+  correct: 'туура',
+  wellDone: 'азаматсың',
+  tryAgain: 'кайра аракет кыл',
+} as const;
+
 export const MATH_RANGE_IDS: MathRangeId[] = MATH_RANGES.map((r) => r.id);
 
 export function isMathRangeId(value: unknown): value is MathRangeId {

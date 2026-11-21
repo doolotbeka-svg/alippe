@@ -1,10 +1,28 @@
 // Простой service worker: сеть с откатом на кэш (network-first),
 // чтобы приложение открывалось без интернета после первого визита.
-const CACHE = 'alippe-v1';
+const CACHE = 'alippe-v2';
 const PRECACHE = ['/', '/index.html', '/manifest.json', '/icon.svg'];
 
 self.addEventListener('install', (event) => {
-  event.waitUntil(caches.open(CACHE).then((c) => c.addAll(PRECACHE)).then(() => self.skipWaiting()));
+  event.waitUntil(
+    caches
+      .open(CACHE)
+      .then(async (c) => {
+        await c.addAll(PRECACHE);
+        // Кыргызская озвучка: небольшие mp3, кэшируем все сразу для офлайна.
+        try {
+          const res = await fetch('/audio/index.json');
+          if (res.ok) {
+            await c.put('/audio/index.json', res.clone());
+            const files = [...new Set(Object.values(await res.json()))];
+            await c.addAll(files.map((f) => '/audio/' + f));
+          }
+        } catch {
+          // озвучка подгрузится по мере использования
+        }
+      })
+      .then(() => self.skipWaiting())
+  );
 });
 
 self.addEventListener('activate', (event) => {

@@ -18,10 +18,12 @@ import {
   LETTER_LESSONS,
   MATH_RANGES,
   MathRangeId,
+  letterSpeechText,
   numberToKyrgyz,
+  PRAISE,
 } from '../data/curriculum';
 import type { ClassAssignment, StudentAccount } from '../data/students';
-import { speak } from '../lib/speech';
+import { speak, warmUp } from '../lib/speech';
 
 interface LessonWorkspaceProps {
   student: StudentAccount;
@@ -122,6 +124,16 @@ export function LessonWorkspace(props: LessonWorkspaceProps) {
     resetSession();
   }, [selectedLetterId, selectedMathRange]);
 
+  // Заранее подгружаем звуки урока, чтобы не было задержки при нажатии.
+  useEffect(() => {
+    warmUp([
+      letterSpeechText(lesson.id),
+      ...lesson.syllables,
+      ...lesson.words.map((w) => w.word),
+      ...Object.values(PRAISE),
+    ]);
+  }, [lesson]);
+
   const say = (text: string) => {
     if (soundEnabled) speak(text, speechRate);
   };
@@ -177,17 +189,19 @@ export function LessonWorkspace(props: LessonWorkspaceProps) {
       }, 900);
     } else {
       setMathFeedback('wrong');
+      say(PRAISE.tryAgain);
     }
   };
 
   // --- Блок 3: загадка
   const answerRiddle = (index: number) => {
     if (completed[3]) return;
-    say(lesson.words[index].word);
     if (index === lesson.riddle.answerIndex) {
+      say(lesson.words[index].word);
       setRiddleResult('correct');
       completeBlock(3, 3, `Отгадал(а) загадку «Табышмак» на букву «${lesson.id}»`);
     } else {
+      say(PRAISE.tryAgain);
       setRiddleResult('wrong');
     }
   };
@@ -195,6 +209,7 @@ export function LessonWorkspace(props: LessonWorkspaceProps) {
   const finish = () => {
     onFinishLesson(lesson.id, selectedMathRange, sessionStars);
     setFinished(true);
+    say(PRAISE.wellDone);
   };
 
   const isAssigned = assignment.letterId === lesson.id && assignment.mathRange === selectedMathRange;
@@ -274,7 +289,7 @@ export function LessonWorkspace(props: LessonWorkspaceProps) {
           <div className="flex items-center gap-4">
             <button
               type="button"
-              onClick={() => say(lesson.id)}
+              onClick={() => say(letterSpeechText(lesson.id))}
               className="grid place-items-center w-20 h-20 rounded-2xl bg-sky-50 dark:bg-sky-950/50 text-sky-700 dark:text-sky-300 font-display font-bold text-5xl"
               aria-label={`Послушать букву ${lesson.id}`}
             >
