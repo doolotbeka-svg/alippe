@@ -1,12 +1,18 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { WifiOff } from 'lucide-react';
-import { LETTER_LESSONS, MATH_RANGES, MathRangeId } from './data/curriculum';
+import { isMathRangeId, LETTER_LESSONS, MATH_RANGES, MathRangeId } from './data/curriculum';
 import {
   ActivityEvent,
   ClassAssignment,
+  DEFAULT_SETTINGS,
+  emptyLetterMastery,
+  emptyMathMastery,
   loadStoredAssignment,
   loadStoredEvents,
   loadStoredStudents,
+  makeId,
+  MAX_EVENTS,
+  pickAvatarColor,
   STORAGE_KEYS,
   StudentAccount,
   StudentSettings,
@@ -19,88 +25,94 @@ import { ParentDashboard } from './components/ParentDashboard';
 import { TeacherDashboard } from './components/TeacherDashboard';
 import { useOnlineStatus, usePWAInstall } from './hooks/usePWA';
 
+function saveJson(key: string, value: unknown) {
+  try {
+    localStorage.setItem(key, typeof value === 'string' ? value : JSON.stringify(value));
+  } catch {
+    // хранилище недоступно (приватный режим и т.п.)
+  }
+}
+
+function dayKey(iso: string): string {
+  const d = new Date(iso);
+  return `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`;
+}
+
+/** Серия дней подряд: продолжаем, если прошлое занятие было вчера. */
+function nextStreak(student: StudentAccount, nowIso: string): number {
+  const last = student.history[0]?.timestamp;
+  if (!last) return Math.max(1, student.streakDays);
+  if (dayKey(last) === dayKey(nowIso)) return Math.max(1, student.streakDays);
+  const yesterday = new Date(nowIso);
+  yesterday.setDate(yesterday.getDate() - 1);
+  return dayKey(last) === dayKey(yesterday.toISOString()) ? student.streakDays + 1 : 1;
+}
+
 export function App() {
   const [students, setStudents] = useState<StudentAccount[]>(() => loadStoredStudents());
   const [activeStudentId, setActiveStudentId] = useState<string>(() => {
     try {
-      const saved = localStorage.getItem(STORAGE_KEYS.ACTIVE_STUDENT);
-      if (saved) return saved;
+      return localStorage.getItem(STORAGE_KEYS.ACTIVE_STUDENT) ?? '';
     } catch {
-      // ignore
+      return '';
     }
-    return 'student-1';
   });
   const [assignment, setAssignment] = useState<ClassAssignment>(() => loadStoredAssignment());
-  const [events, setEvents] = useState<ActivityEvent[]>(() => loadStoredEvents(loadStoredStudents()));
+  const [events, setEvents] = useState<ActivityEvent[]>(() => loadStoredEvents(students));
 
   const [activeView, setActiveView] = useState<AppView>('lesson');
-  const [selectedLetterId, setSelectedLetterId] = useState<string>(() => loadStoredAssignment().letterId);
-  const [selectedMathRange, setSelectedMathRange] = useState<MathRangeId>(
-    () => loadStoredAssignment().mathRange
-  );
+  const [selectedLetterId, setSelectedLetterId] = useState<string>(() => assignment.letterId);
+  const [selectedMathRange, setSelectedMathRange] = useState<MathRangeId>(() => assignment.mathRange);
   const [liveSimEnabled, setLiveSimEnabled] = useState(false);
 
   const isOnline = useOnlineStatus();
   const { isInstallable, install } = usePWAInstall();
   const channelRef = useRef<BroadcastChannel | null>(null);
+  /** true, когда последнее изменение сделано в этой вкладке и его надо разослать. */
+  const pendingBroadcastRef = useRef(false);
+  const studentsRef = useRef(students);
+  studentsRef.current = students;
 
   const activeStudent = useMemo(
-    () => students.find((s) => s.id === activeStudentId) || students[0],
+    () => students.find((s) => s.id === activeStudentId) ?? students[0],
     [students, activeStudentId]
   );
 
-  // Sync dark mode class on <html>
+  // Если сохранённого ученика больше нет — переключаемся на первого.
   useEffect(() => {
-    const isDark = activeStudent?.settings.theme === 'dark';
-    document.documentElement.classList.toggle('dark', isDark);
+    if (activeStudent && activeStudent.id !== activeStudentId) setActiveStudentId(activeStudent.id);
+  }, [activeStudent, activeStudentId]);
+
+  // Тёмная тема на <html>
+  useEffect(() => {
+    document.documentElement.classList.toggle('dark', activeStudent?.settings.theme === 'dark');
   }, [activeStudent?.settings.theme]);
 
-  // Persist to localStorage
-  useEffect(() => {
-    try {
-      localStorage.setItem(STORAGE_KEYS.STUDENTS, JSON.stringify(students));
-    } catch {
-      // ignore
-    }
-  }, [students]);
+  // Сохранение в localStorage
+  useEffect(() => saveJson(STORAGE_KEYS.STUDENTS, students), [students]);
+  useEffect(() => saveJson(STORAGE_KEYS.ACTIVE_STUDENT, activeStudentId), [activeStudentId]);
+  useEffect(() => saveJson(STORAGE_KEYS.EVENTS, events.slice(0, MAX_EVENTS)), [events]);
+  useEffect(() => saveJson(STORAGE_KEYS.ASSIGNMENT, assignment), [assignment]);
 
-  useEffect(() => {
-    try {
-      localStorage.setItem(STORAGE_KEYS.ACTIVE_STUDENT, activeStudentId);
-    } catch {
-      // ignore
-    }
-  }, [activeStudentId]);
-
-  useEffect(() => {
-    try {
-      localStorage.setItem(STORAGE_KEYS.EVENTS, JSON.stringify(events.slice(0, 40)));
-    } catch {
-      // ignore
-    }
-  }, [events]);
-
-  useEffect(() => {
-    try {
-      localStorage.setItem(STORAGE_KEYS.ASSIGNMENT, JSON.stringify(assignment));
-    } catch {
-      // ignore
-    }
-  }, [assignment]);
-
-  // Real-time cross-tab BroadcastChannel sync
+  // Синхронизация между вкладками через BroadcastChannel
   useEffect(() => {
     if (typeof BroadcastChannel === 'undefined') return;
     const ch = new BroadcastChannel(SYNC_CHANNEL_NAME);
     channelRef.current = ch;
 
-    ch.onmessage = (msg) => {
+    ch.onmessage = (msg: MessageEvent) => {
       const payload = msg.data;
-      if (!payload || typeof payload !== 'object') return;
-      if (payload.type === 'SYNC_STATE') {
-        if (Array.isArray(payload.students)) setStudents(payload.students);
-        if (Array.isArray(payload.events)) setEvents(payload.events);
-        if (payload.assignment) setAssignment(payload.assignment);
+      if (!payload || typeof payload !== 'object' || payload.type !== 'SYNC_STATE') return;
+      if (Array.isArray(payload.students) && payload.students.length > 0) setStudents(payload.students);
+      if (Array.isArray(payload.events)) setEvents(payload.events.slice(0, MAX_EVENTS));
+      const a = payload.assignment;
+      if (
+        a &&
+        typeof a.letterId === 'string' &&
+        LETTER_LESSONS.some((l) => l.id === a.letterId) &&
+        isMathRangeId(a.mathRange)
+      ) {
+        setAssignment({ note: '', updatedAt: new Date().toISOString(), ...a });
       }
     };
 
@@ -110,208 +122,213 @@ export function App() {
     };
   }, []);
 
-  const broadcastState = useCallback(
-    (nextStudents: StudentAccount[], nextEvents: ActivityEvent[], nextAssignment: ClassAssignment) => {
-      channelRef.current?.postMessage({
-        type: 'SYNC_STATE',
-        students: nextStudents,
-        events: nextEvents,
-        assignment: nextAssignment,
-      });
-    },
-    []
-  );
+  // Рассылаем состояние после локальных изменений (не в ответ на входящие сообщения —
+  // иначе вкладки будут бесконечно пересылать друг другу одно и то же).
+  useEffect(() => {
+    if (!pendingBroadcastRef.current) return;
+    pendingBroadcastRef.current = false;
+    channelRef.current?.postMessage({ type: 'SYNC_STATE', students, events, assignment });
+  }, [students, events, assignment]);
 
-  // Optional Real-time Classroom Simulation for Teacher Dashboard
+  const markLocalChange = () => {
+    pendingBroadcastRef.current = true;
+  };
+
+  // Демо-режим класса для панели учителя
   useEffect(() => {
     if (!liveSimEnabled) return;
     const phrases = [
-      (l: string) => `Прочитал(а) слоги буквы «${l}» на горной реке`,
+      (l: string) => `Прочитал(а) слоги буквы «${l}»`,
       (l: string) => `Узнал(а) все 5 кыргызских слов на букву «${l}»`,
-      () => `Решил(а) задачи по счету на кыргызском`,
+      () => `Решил(а) задачи по счёту на кыргызском`,
       (l: string) => `Отгадал(а) загадку «Табышмак» на букву «${l}»`,
     ];
 
     const id = window.setInterval(() => {
-      setStudents((prev) => {
-        const idx = Math.floor(Math.random() * prev.length);
-        const target = prev[idx];
-        if (!target) return prev;
-        const letter = LETTER_LESSONS[Math.floor(Math.random() * LETTER_LESSONS.length)].id;
-        const mathR = MATH_RANGES[Math.floor(Math.random() * MATH_RANGES.length)].id;
-        const delta = 1 + Math.floor(Math.random() * 2);
-        const msg = phrases[Math.floor(Math.random() * phrases.length)](letter);
+      const list = studentsRef.current;
+      const target = list[Math.floor(Math.random() * list.length)];
+      if (!target) return;
+      const letter = LETTER_LESSONS[Math.floor(Math.random() * LETTER_LESSONS.length)].id;
+      const mathR = MATH_RANGES[Math.floor(Math.random() * MATH_RANGES.length)].id;
+      const delta = 1 + Math.floor(Math.random() * 2);
+      const nowIso = new Date().toISOString();
 
-        const updatedStudent: StudentAccount = {
-          ...target,
-          stars: target.stars + delta,
-          status: 'active',
-          lastActiveAt: new Date().toISOString(),
-          currentActivity: `Буква «${letter}» · Счет ${mathR}`,
-          letterMastery: {
-            ...target.letterMastery,
-            [letter]: Math.min(100, (target.letterMastery[letter] ?? 50) + 5),
+      markLocalChange();
+      setStudents((prev) =>
+        prev.map((s) =>
+          s.id !== target.id
+            ? s
+            : {
+                ...s,
+                stars: s.stars + delta,
+                status: 'active',
+                lastActiveAt: nowIso,
+                currentActivity: `Буква «${letter}» · Счёт ${mathR}`,
+                letterMastery: {
+                  ...s.letterMastery,
+                  [letter]: Math.min(100, (s.letterMastery[letter] ?? 50) + 5),
+                },
+              }
+        )
+      );
+      setEvents((prev) =>
+        [
+          {
+            id: makeId('ev'),
+            studentId: target.id,
+            studentName: target.name,
+            message: phrases[Math.floor(Math.random() * phrases.length)](letter),
+            starsDelta: delta,
+            timestamp: nowIso,
           },
-        };
-
-        const nextStudents = prev.map((s, i) => (i === idx ? updatedStudent : s));
-        const newEvent: ActivityEvent = {
-          id: `ev-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
-          studentId: target.id,
-          studentName: target.name,
-          message: msg,
-          starsDelta: delta,
-          timestamp: new Date().toISOString(),
-        };
-
-        setEvents((prevEv) => [newEvent, ...prevEv].slice(0, 40));
-        return nextStudents;
-      });
+          ...prev,
+        ].slice(0, MAX_EVENTS)
+      );
     }, 4500);
 
     return () => window.clearInterval(id);
   }, [liveSimEnabled]);
 
-  const handleEarnStars = useCallback(
-    (
-      amount: number,
-      reason: string,
-      letterId: string,
-      mathRange: MathRangeId,
-      blockIndex: number
-    ) => {
-      const nowIso = new Date().toISOString();
-      setStudents((prev) => {
-        const nextStudents = prev.map((s) => {
-          if (s.id !== activeStudent.id) return s;
-          const nextLetterVal =
-            blockIndex === 0 || blockIndex === 1 || blockIndex === 3
-              ? Math.min(100, (s.letterMastery[letterId] ?? 0) + 8)
-              : s.letterMastery[letterId] ?? 0;
-          const nextMathVal =
-            blockIndex === 2
-              ? Math.min(100, (s.mathMastery[mathRange] ?? 0) + 10)
-              : s.mathMastery[mathRange] ?? 0;
+  const activeId = activeStudent?.id;
+  const activeName = activeStudent?.name ?? '';
 
+  const handleEarnStars = useCallback(
+    (amount: number, reason: string, letterId: string, mathRange: MathRangeId, blockIndex: number) => {
+      if (!activeId) return;
+      const nowIso = new Date().toISOString();
+      markLocalChange();
+      setStudents((prev) =>
+        prev.map((s) => {
+          if (s.id !== activeId) return s;
+          const letterBlock = blockIndex === 0 || blockIndex === 1 || blockIndex === 3;
           return {
             ...s,
             stars: s.stars + amount,
-            status: 'active' as const,
+            status: 'active',
             lastActiveAt: nowIso,
-            currentActivity: `Буква «${letterId}» · Счет ${mathRange}`,
-            letterMastery: { ...s.letterMastery, [letterId]: nextLetterVal },
-            mathMastery: { ...s.mathMastery, [mathRange]: nextMathVal },
+            currentActivity: `Буква «${letterId}» · Счёт ${mathRange}`,
+            letterMastery: letterBlock
+              ? { ...s.letterMastery, [letterId]: Math.min(100, (s.letterMastery[letterId] ?? 0) + 8) }
+              : s.letterMastery,
+            mathMastery:
+              blockIndex === 2
+                ? { ...s.mathMastery, [mathRange]: Math.min(100, (s.mathMastery[mathRange] ?? 0) + 10) }
+                : s.mathMastery,
           };
-        });
-
-        const newEv: ActivityEvent = {
-          id: `ev-${Date.now()}`,
-          studentId: activeStudent.id,
-          studentName: activeStudent.name,
-          message: reason,
-          starsDelta: amount,
-          timestamp: nowIso,
-        };
-
-        setEvents((prevEv) => {
-          const nextEv = [newEv, ...prevEv].slice(0, 40);
-          broadcastState(nextStudents, nextEv, assignment);
-          return nextEv;
-        });
-
-        return nextStudents;
-      });
+        })
+      );
+      setEvents((prev) =>
+        [
+          {
+            id: makeId('ev'),
+            studentId: activeId,
+            studentName: activeName,
+            message: reason,
+            starsDelta: amount,
+            timestamp: nowIso,
+          },
+          ...prev,
+        ].slice(0, MAX_EVENTS)
+      );
     },
-    [activeStudent, assignment, broadcastState]
+    [activeId, activeName]
   );
 
   const handleFinishLesson = useCallback(
     (letterId: string, mathRange: MathRangeId, sessionStars: number) => {
+      if (!activeId) return;
       const nowIso = new Date().toISOString();
+      markLocalChange();
       setStudents((prev) =>
-        prev.map((s) => {
-          if (s.id !== activeStudent.id) return s;
-          return {
-            ...s,
-            completedLessons: s.completedLessons + 1,
-            history: [
-              {
-                id: `hist-${Date.now()}`,
-                timestamp: nowIso,
-                letterId,
-                mathRange,
-                starsEarned: sessionStars,
-                blocksCompleted: 4,
-              },
-              ...s.history,
-            ].slice(0, 20),
-          };
-        })
+        prev.map((s) =>
+          s.id !== activeId
+            ? s
+            : {
+                ...s,
+                completedLessons: s.completedLessons + 1,
+                streakDays: nextStreak(s, nowIso),
+                status: 'idle',
+                currentActivity: `Завершил(а) занятие: буква «${letterId}»`,
+                history: [
+                  {
+                    id: makeId('hist'),
+                    timestamp: nowIso,
+                    letterId,
+                    mathRange,
+                    starsEarned: sessionStars,
+                    blocksCompleted: 4,
+                  },
+                  ...s.history,
+                ].slice(0, 20),
+              }
+        )
+      );
+      setEvents((prev) =>
+        [
+          {
+            id: makeId('ev'),
+            studentId: activeId,
+            studentName: activeName,
+            message: `Завершил(а) занятие (буква «${letterId}», счёт ${mathRange})`,
+            starsDelta: 0,
+            timestamp: nowIso,
+          },
+          ...prev,
+        ].slice(0, MAX_EVENTS)
       );
     },
-    [activeStudent]
+    [activeId, activeName]
   );
 
   const handleUpdateStudentSettings = useCallback(
     (patch: Partial<StudentSettings>) => {
+      if (!activeId) return;
+      markLocalChange();
       setStudents((prev) =>
-        prev.map((s) =>
-          s.id === activeStudent.id
-            ? { ...s, settings: { ...s.settings, ...patch } }
-            : s
-        )
+        prev.map((s) => (s.id === activeId ? { ...s, settings: { ...s.settings, ...patch } } : s))
       );
     },
-    [activeStudent]
+    [activeId]
   );
 
   const handleAddStudent = useCallback((name: string, emoji: string) => {
-    const id = `student-${Date.now()}`;
-    const letterMastery: Record<string, number> = {};
-    LETTER_LESSONS.forEach((l) => {
-      letterMastery[l.id] = 0;
-    });
-
+    const id = makeId('student');
     const created: StudentAccount = {
       id,
       name,
       avatarEmoji: emoji,
-      avatarColor: 'bg-sky-100 text-sky-700 dark:bg-sky-950/60 dark:text-sky-300',
+      avatarColor: pickAvatarColor(studentsRef.current.length + 1),
       grade: '1-«А» класс',
       stars: 0,
       streakDays: 1,
       completedLessons: 0,
-      letterMastery,
-      mathMastery: { '1-10': 0, '11-20': 0, 'tens-10-100': 0, '1-100': 0 },
+      letterMastery: emptyLetterMastery(),
+      mathMastery: emptyMathMastery(),
       lastActiveAt: new Date().toISOString(),
       status: 'active',
       currentActivity: 'Новый ученик',
-      settings: { theme: 'light', speechRate: 0.88, soundEnabled: true },
+      settings: { ...DEFAULT_SETTINGS },
       history: [],
     };
 
+    markLocalChange();
     setStudents((prev) => [created, ...prev]);
     setActiveStudentId(id);
     setActiveView('lesson');
   }, []);
 
-  const handleUpdateAssignment = useCallback(
-    (next: ClassAssignment) => {
-      setAssignment(next);
-      setSelectedLetterId(next.letterId);
-      setSelectedMathRange(next.mathRange);
-      broadcastState(students, events, next);
-    },
-    [students, events, broadcastState]
-  );
+  const handleUpdateAssignment = useCallback((next: ClassAssignment) => {
+    markLocalChange();
+    setAssignment(next);
+    setSelectedLetterId(next.letterId);
+    setSelectedMathRange(next.mathRange);
+  }, []);
+
+  if (!activeStudent) return null;
 
   return (
     <div className="min-h-screen flex flex-col bg-slate-50 dark:bg-slate-950 text-slate-900 dark:text-slate-100 transition-colors">
-      <Header
-        activeView={activeView}
-        onSelectView={setActiveView}
-        activeStudent={activeStudent}
-      />
+      <Header activeView={activeView} onSelectView={setActiveView} activeStudent={activeStudent} />
 
       <main className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 py-6 sm:py-8">
         {activeView === 'lesson' && (
@@ -330,9 +347,7 @@ export function App() {
               })
             }
             onToggleSound={() =>
-              handleUpdateStudentSettings({
-                soundEnabled: !activeStudent.settings.soundEnabled,
-              })
+              handleUpdateStudentSettings({ soundEnabled: !activeStudent.settings.soundEnabled })
             }
             isOnline={isOnline}
             isInstallable={isInstallable}
@@ -383,7 +398,7 @@ export function App() {
 
       <footer className="border-t border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-950">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 py-5 flex flex-wrap items-center justify-between gap-4 text-xs text-slate-500 dark:text-slate-400">
-          <span>Алиппе Жолу · Кыргызский язык и счет для 1 класса</span>
+          <span>Алиппе Жолу · Кыргызский язык и счёт для 1 класса</span>
           <span>Работает офлайн · Все данные учеников сохраняются локально</span>
         </div>
       </footer>

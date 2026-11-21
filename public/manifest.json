@@ -1,0 +1,14 @@
+{
+  "name": "Алиппе Жолу — кыргызский язык и счёт",
+  "short_name": "Алиппе Жолу",
+  "description": "Интерактивные занятия по кыргызскому языку и счёту для 1 класса",
+  "lang": "ru",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#f8fafc",
+  "theme_color": "#0284c7",
+  "icons": [
+    { "src": "/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable" }
+  ]
+}
